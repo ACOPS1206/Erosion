@@ -5,6 +5,7 @@
 //  Created by lunginspector on 7/22/26.
 //
 
+import Darwin
 import SwiftUI
 
 enum FolderType {
@@ -25,24 +26,39 @@ func getFolderType(url: URL) -> FolderType {
 // skidded from worse_query. thx forcequit 1000x!!
 func getBIDFromXattr(_ url: URL) -> String? {
     let handle = wq.grantAccess(path: url.path).1
-    
-    if handle > 0 {
-        var buf = [CChar](repeating: 0, count: 512)
-        let len = getxattr(url.path, "com.apple.containermanager.identifier", &buf, 511, 0, 0)
-        
-        if len < 0 {
-            print("failed to read xattr: \(String(cString: strerror(errno))) (errno \(errno))")
-            return nil
-        }
-        
+    guard handle >= 0 else { return nil }
+    defer { wq.releaseHandle(handle) }
+
+    var buf = [CChar](repeating: 0, count: 512)
+    let len = getxattr(url.path, "com.apple.containermanager.identifier", &buf, 511, 0, 0)
+    let xattrError: Int32? = len < 0 ? errno : nil
+
+    if len > 0 {
         let bid = String(cString: buf)
-        
-        wq.releaseHandle(handle)
-        
         if !bid.isEmpty {
             return bid
         }
     }
+
+    // Some containers do not expose an identifier xattr. Try their metadata
+    // while the container's sandbox extension is still held.
+    let metadataNames = [
+        ".com.apple.mobile_container_manager.metadata.plist",
+        "com.apple.mobile_container_manager.metadata.plist"
+    ]
+    for name in metadataNames {
+        let metadataURL = url.appendingPathComponent(name)
+        if let data = try? Data(contentsOf: metadataURL),
+           let bid = metadataID(from: data),
+           !bid.isEmpty {
+            return bid
+        }
+    }
+
+    if let xattrError {
+        print("failed to read xattr: \(String(cString: strerror(xattrError))) (errno \(xattrError))")
+    }
+    print("(fs) failed to identify container: \(url.path)")
     return nil
 }
 
